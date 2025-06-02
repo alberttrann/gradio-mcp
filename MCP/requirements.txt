@@ -1,0 +1,4 @@
+openai
+tavily-python
+gradio[mcp]
+python-dotenv
