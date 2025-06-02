@@ -1,4 +1,8 @@
-openai
-tavily-python
-gradio[mcp]
-python-dotenv
+openai>=1.0.0
+tavily-python>=0.2.0
+gradio[mcp]>=4.0.0
+python-dotenv>=1.0.0
+retry>=0.9.2
+aiohttp>=3.8.0
+tenacity>=8.2.0
+tiktoken>=0.5.0
