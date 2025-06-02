@@ -1,10 +1,19 @@
-# app.py (HTTP SSE Gradio MCP Server - same as before)
+# app.py (HTTP SSE Gradio MCP Server)
 
 import os
 import gradio as gr
 from openai import OpenAI
 from tavily import TavilyClient
 from dotenv import load_dotenv
+from tenacity import retry, stop_after_attempt, wait_exponential
+from logger_config import setup_logging
+from utils import validate_response, parse_research_results, format_sources_section
+
+# Set up logging
+loggers = setup_logging()
+server_logger = loggers['server']
+research_logger = loggers['research']
+synthesis_logger = loggers['synthesis']
 
 # Load environment variables from .env file
 load_dotenv()
@@ -15,124 +24,135 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 YOUR_SITE_URL = os.getenv("YOUR_SITE_URL", "http://localhost:7860")
 YOUR_SITE_NAME = os.getenv("YOUR_SITE_NAME", "My RAG MCP Server")
 
-if not OPENROUTER_API_KEY:
-    raise ValueError("OPENROUTER_API_KEY not found in .env")
-if not TAVILY_API_KEY:
-    raise ValueError("TAVILY_API_KEY not found in .env")
+# Verify required environment variables
+required_vars = {
+    "OPENROUTER_API_KEY": OPENROUTER_API_KEY,
+    "TAVILY_API_KEY": TAVILY_API_KEY,
+    "YOUR_SITE_URL": YOUR_SITE_URL,
+    "YOUR_SITE_NAME": YOUR_SITE_NAME
+}
 
-# --- Initialize API Clients ---
-openrouter_client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY,
+missing_vars = [key for key, value in required_vars.items() if not value]
+if missing_vars:
+    error_msg = f"Missing required environment variables: {', '.join(missing_vars)}"
+    server_logger.error(error_msg)
+    raise EnvironmentError(f"{error_msg}\nPlease check your .env file and ensure all variables are set.")
+
+# Enhanced configuration
+MODELS = {
+    "planner": "deepseek/deepseek-r1-0528:free",
+    "researcher": "deepseek/deepseek-chat-v3-0324:free", 
+    "synthesizer": "qwen/qwen3-30b-a3b:free"
+}
+
+# Initialize clients with proper configuration
+try:
+    openrouter_client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=OPENROUTER_API_KEY,
+        default_headers={
+            "HTTP-Referer": YOUR_SITE_URL,
+            "X-Title": YOUR_SITE_NAME
+        }
+    )
+    server_logger.info("OpenRouter client initialized successfully")
+except Exception as e:
+    server_logger.error(f"Failed to initialize OpenRouter client: {str(e)}")
+    raise
+
+try:
+    tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
+    server_logger.info("Tavily client initialized successfully")
+except Exception as e:
+    server_logger.error(f"Failed to initialize Tavily client: {str(e)}")
+    raise
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=10),
+    reraise=True
 )
-tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
-
 def research_with_tavily(query: str, max_results: int = 12) -> tuple[str, list]:
     try:
-        print(f"Tavily: Performing comprehensive research for '{query}'")
+        research_logger.info(f"Starting research for query: {query}")
         
-        # More comprehensive query expansion
-        expanded_query = f"""Comprehensive technical analysis and state-of-the-art review of: {query}
-        Must include:
-        - Theoretical foundations and mathematical principles
-        - Core algorithms and architectural details
-        - Implementation strategies and best practices
-        - Performance benchmarks and comparisons
-        - Latest research papers and findings
-        - Real-world applications and case studies
-        - Current challenges and limitations
-        - Future research directions"""
+        if not query.strip():
+            raise ValueError("Empty query provided")
         
+        research_logger.debug("Sending search request to Tavily API")
         response = tavily_client.search(
-            query=expanded_query,
+            query=query,
             search_depth="advanced",
             max_results=max_results,
             include_domains=[
                 "arxiv.org", "papers.ssrn.com", "github.com", 
-                "towardsdatascience.com", "medium.com", "distill.pub",
-                "openai.com", "research.google", "microsoft.com/research",
-                "paperswithcode.com", "huggingface.co/blog",
-                "neurips.cc", "icml.cc", "iclr.cc", "jmlr.org",
-                "science.org", "nature.com", "acm.org", "ieee.org"
+                "deepseek.ai", "huggingface.co", "paperswithcode.com"
             ],
             include_answer=True,
-            search_type="comprehensive",
-            search_params={
-                "include_images": True,
-                "include_code": True,
-                "time_window": "1y"  # Focus on recent content
-            }
+            search_type="comprehensive"
         )
         
-        if response and response.get("results"):
-            contexts = []
-            sources = []
-            
-            for result in response["results"]:
-                title = result.get("title", "").strip()
-                content = result.get("content", "").strip()
-                url = result.get("url", "").strip()
-                date = result.get("published_date", "").strip()
-                
-                if title and content:
-                    # Enhanced metadata tracking
-                    sources.append({
-                        "title": title,
-                        "url": url,
-                        "date": date if date else "Date not available",
-                        "type": "research_paper" if "arxiv.org" in url or "paper" in url.lower() else "article"
-                    })
-                    
-                    # Improved content formatting
-                    source_block = f"""### Source: {title}
-URL: {url}
-Date: {date if date else 'Not available'}
-Type: {sources[-1]['type']}
-
-**Key Content:**
-{content}
-
----"""
-                    contexts.append(source_block)
-            
-            context = "\n\n".join(contexts)
-            print(f"Tavily: Found {len(contexts)} high-quality sources ({len([s for s in sources if s['type'] == 'research_paper'])} research papers)")
-            return context, sources
-        else:
-            return "No relevant information found by Tavily", []
+        research_logger.debug("Validating Tavily API response")
+        if not validate_response(response, dict):
+            raise ValueError(f"Invalid response type from Tavily API: {type(response)}")
+        
+        if "results" not in response:
+            raise ValueError("No results field in Tavily API response")
+        
+        results = response["results"]
+        if not validate_response(results, list):
+            raise ValueError(f"Invalid results type from Tavily API: {type(results)}")
+        
+        if not results:
+            research_logger.warning("No results found in research phase")
+            return "No relevant information found in the research phase.", []
+        
+        research_logger.debug("Parsing research results")
+        contexts, sources = parse_research_results(results)
+        
+        if not contexts:
+            research_logger.warning("Found results but no valid content could be extracted")
+            return "Found results but no valid content could be extracted.", []
+        
+        research_logger.info(
+            f"Research complete: {len(contexts)} sources found "
+            f"({len([s for s in sources if s['type'] == 'research_paper'])} research papers)"
+        )
+        return "\n\n".join(contexts), sources
             
     except Exception as e:
-        print(f"Tavily error: {e}")
-        return f"Error performing research with Tavily: {str(e)}", []
+        error_msg = f"Error performing research with Tavily: {str(e)}"
+        research_logger.error(error_msg, exc_info=True)
+        raise
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=10),
+    reraise=True
+)
 def generate_answer_with_openrouter(query: str, context: str, sources: list) -> str:
     try:
-        print(f"OpenRouter: Generating comprehensive answer for '{query}'")
+        synthesis_logger.info(f"Starting answer generation for query: {query}")
         
-        # Enhanced source formatting
-        sources_section = "\n\n## Sources Cited\n\n"
-        research_papers = [s for s in sources if s['type'] == 'research_paper']
-        articles = [s for s in sources if s['type'] == 'article']
+        if not query.strip():
+            raise ValueError("Empty query provided")
+            
+        if not context.strip():
+            raise ValueError("No research context provided")
         
-        if research_papers:
-            sources_section += "\n### Research Papers\n"
-            for idx, source in enumerate(research_papers, 1):
-                sources_section += f"{idx}. [{source['title']}]({source['url']}) - {source['date']}\n"
+        synthesis_logger.debug("Preparing sources section")
+        sources_section = format_sources_section(sources)
         
-        if articles:
-            sources_section += "\n### Technical Articles & Resources\n"
-            for idx, source in enumerate(articles, 1):
-                sources_section += f"{idx}. [{source['title']}]({source['url']}) - {source['date']}\n"
-
-        # Use Claude-3 Opus for better response quality
-        completion = openrouter_client.chat.completions.create(
-            extra_headers={
-                "HTTP-Referer": YOUR_SITE_URL,
-                "X-Title": YOUR_SITE_NAME,
-            },
-            model="anthropic/claude-3-opus:beta",
-            messages=[
-                {"role": "system", "content": """You are a world-class AI researcher and technical writer specializing in creating comprehensive, academically rigorous technical content. Your responses must be detailed (1500-2000 words), well-structured, and extremely knowledge-dense.
+        try:
+            synthesis_logger.debug("Sending completion request to OpenRouter API")
+            completion = openrouter_client.chat.completions.create(
+                extra_headers={
+                    "HTTP-Referer": YOUR_SITE_URL,
+                    "X-Title": YOUR_SITE_NAME,
+                },
+                model="anthropic/claude-3-opus:beta",
+                messages=[
+                    {"role": "system", "content": """You are a world-class AI researcher and technical writer specializing in creating comprehensive, academically rigorous technical content. Your responses must be detailed (1500-2000 words), well-structured, and extremely knowledge-dense.
 
 Key Requirements:
 
@@ -168,7 +188,7 @@ Use extensive markdown formatting:
 - ASCII diagrams for architectures
 - Bold for key concepts
 - Headers for clear structure"""},
-                {"role": "user", "content": f"""Context:\n{context}\n\nQuestion: {query}\n\nProvide an exceptionally detailed technical analysis that would be valuable to both researchers and practitioners. Your response must be:
+                    {"role": "user", "content": f"""Context:\n{context}\n\nQuestion: {query}\n\nProvide an exceptionally detailed technical analysis that would be valuable to both researchers and practitioners. Your response must be:
 
 1. Comprehensive (1500-2000 words)
 2. Technically precise with mathematics and code
@@ -178,26 +198,39 @@ Use extensive markdown formatting:
 6. Forward-looking with research directions
 
 If certain aspects aren't covered in the provided context, acknowledge these gaps and suggest additional research directions."""}
-            ],
-            temperature=0.1,
-            max_tokens=4000,
-            presence_penalty=0.6,
-            frequency_penalty=0.3
-        )
-        
-        response = completion.choices[0].message.content
-        
-        # Add reference implementation if code examples are present
-        if "```python" in response:
-            response += "\n\n## Reference Implementation\nThe code examples above are available in this repository: [GitHub - RAG-Examples](https://github.com/yourusername/rag-examples)"
-        
-        # Combine response with sources
-        full_response = response + "\n\n" + sources_section
-        return full_response
-        
+                ],
+                temperature=0.1,
+                max_tokens=4000,
+                presence_penalty=0.6,
+                frequency_penalty=0.3
+            )
+            
+            if not completion or not completion.choices:
+                raise ValueError("Empty completion response from OpenRouter API")
+            
+            response = completion.choices[0].message.content
+            if not response:
+                raise ValueError("Empty response content from language model")
+            
+            synthesis_logger.debug("Processing and formatting response")
+            
+            # Add reference implementation if code examples are present
+            if "```python" in response:
+                response += "\n\n## Reference Implementation\nThe code examples above are available in this repository: [GitHub - RAG-Examples](https://github.com/yourusername/rag-examples)"
+            
+            # Combine response with sources
+            full_response = response + "\n\n" + sources_section
+            
+            synthesis_logger.info("Successfully generated comprehensive response")
+            return full_response
+            
+        except Exception as e:
+            raise Exception(f"Error generating response with language model: {str(e)}")
+            
     except Exception as e:
-        print(f"OpenRouter error: {e}")
-        return f"Error generating answer with OpenRouter: {str(e)}"
+        error_msg = f"Error generating answer: {str(e)}"
+        synthesis_logger.error(error_msg, exc_info=True)
+        raise
 
 def multi_step_rag_tool(user_query: str) -> str:
     """Enhanced RAG tool with multi-stage research and synthesis"""
@@ -430,31 +463,74 @@ Requirements:
         print(f"Synthesis error: {e}")
         return None
 
-# --- Gradio Interface ---
+def process_query(query: str) -> str:
+    """Main function to process user queries through the multi-step RAG system"""
+    try:
+        server_logger.info(f"Processing new query: {query}")
+        
+        # Step 1: Research Phase
+        server_logger.debug("Starting research phase")
+        try:
+            context, sources = research_with_tavily(query)
+            if "Error performing research" in context:
+                raise Exception(context)
+        except Exception as e:
+            server_logger.error(f"Research phase failed: {str(e)}", exc_info=True)
+            return f"Failed to gather research: {str(e)}"
+            
+        # Step 2: Synthesis Phase
+        server_logger.debug("Starting synthesis phase")
+        try:
+            response = generate_answer_with_openrouter(query, context, sources)
+            if "Error generating answer" in response:
+                raise Exception(response)
+        except Exception as e:
+            server_logger.error(f"Synthesis phase failed: {str(e)}", exc_info=True)
+            return f"Failed to generate response: {str(e)}"
+            
+        server_logger.info("Query processing completed successfully")
+        return response
+        
+    except Exception as e:
+        error_msg = f"Error processing query: {str(e)}"
+        server_logger.error(error_msg, exc_info=True)
+        return error_msg
+
+# Create Gradio interface
+server_logger.info("Initializing Gradio interface")
+iface = gr.Interface(
+    fn=process_query,
+    inputs=gr.Textbox(
+        lines=3,
+        placeholder="Enter your research query here...",
+        label="Research Query"
+    ),
+    outputs=gr.Markdown(
+        label="Research Results",
+        show_label=True
+    ),
+    title="Multi-Step RAG Research System",
+    description="""This system performs deep technical research using a multi-step process:
+1. Gathers comprehensive research from academic and technical sources
+2. Synthesizes findings into a detailed technical analysis
+3. Provides implementation guidance and practical examples""",
+    examples=[
+        ["What are the latest advances in transformer architecture optimizations?"],
+        ["Explain the mathematical foundations of diffusion models"],
+        ["Compare and analyze different approaches to few-shot learning"]
+    ],
+    allow_flagging="never"
+)
+
+# Launch the interface
 if __name__ == "__main__":
-    print("Initializing Gradio Interface for HTTP MCP Server...")
-    
-    demo = gr.Interface(
-        fn=multi_step_rag_tool,
-        inputs=gr.Textbox(
-            lines=3,
-            placeholder="Enter your question...",
-            label="Query"
-        ),
-        outputs=gr.Markdown(
-            label="Response",
-            show_label=True
-        ),
-        title="Multi-Step RAG System",
-        description="Uses Tavily for research and Multi-Agent System for answer generation.",
-        examples=[
-            ["What are the recent breakthroughs in AI-driven drug discovery?"],
-            ["Explain the concept of Zero-Knowledge Proofs."],
-        ]
-    )
-    
-    print("Launching Gradio app with HTTP MCP server enabled.")
-    print("Look for 'MCP server (using SSE) running at: http://<url>/gradio_api/mcp/sse'")
-    
-    demo.queue()  # Enable queuing for better handling of multiple requests
-    demo.launch(server_name="0.0.0.0", server_port=7860, share=False, mcp_server=True)
+    try:
+        server_logger.info(f"Starting Gradio server at {YOUR_SITE_URL}")
+        iface.launch(
+            server_name="0.0.0.0",
+            share=False,
+            debug=True
+        )
+    except Exception as e:
+        server_logger.error(f"Failed to start Gradio server: {str(e)}", exc_info=True)
+        raise
