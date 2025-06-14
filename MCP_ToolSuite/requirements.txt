@@ -1,0 +1,8 @@
+mcp
+python-dotenv
+google-generativeai
+tavily-python
+requests
+markdown-it-py
+matplotlib
+google-genai
