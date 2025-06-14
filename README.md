@@ -4,6 +4,7 @@ This project is a powerful, conversational AI agent platform built on the Model 
 
 The system is designed to be a versatile AI assistant, capable of everything from quick web searches and in-depth research to data visualization and code analysis. The client maintains conversational context, allowing for natural, follow-up questions.
 
+The logic for conduct_deep_research tool is derived from this multi-agent deep research system, but non-MCP: https://github.com/alberttrann/multi-agent_deep-research
 ---
 ## Key Concepts
 
