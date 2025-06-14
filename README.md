@@ -698,7 +698,7 @@ INFO:     127.0.0.1:62841 - "POST /messages/?session_id=fb39df496bda4879987efb1a
 2025-06-14 12:02:59,206 - __main__ - INFO - MCP Tool: VISUALIZE data as a pie chart.
 ```
 --------------------------------------
-## Some more deep research attemps 
+## Some more deep research attemps (This is before the suite-of-tools implementation, only deep research :) )
 * V-JEPA2:
 ```
 PS F:\MCP_DeepResearch> python mcp_server.py
