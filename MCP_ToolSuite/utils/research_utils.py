@@ -42,18 +42,15 @@ def format_sources_section(sources: List[Dict[str, str]]) -> str:
         
     return sources_section
 
-# We are keeping the other functions from the original file in your project
-# as they might be used elsewhere, or you might want to add them back later.
+
 def validate_response(response: Any, expected_type: type) -> bool:
     """Validate response type and structure"""
     return isinstance(response, expected_type)
 
 def save_markdown_report(content: str) -> str:
     """Save markdown content to a file"""
-    # This function remains unchanged
     pass
 
 def convert_to_html(markdown_content: str) -> str:
     """Convert markdown to styled HTML"""
-    # This function remains unchanged
     pass
