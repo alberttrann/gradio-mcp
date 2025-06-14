@@ -1,13 +1,13 @@
 # Multi-Tool AI Agent & MCP Server
 
-This project is a powerful, conversational AI agent platform built on the Message Control Protocol (MCP). It features a robust server that exposes a suite of specialized AI-powered tools and a dynamic client that can intelligently discover and use them.
+This project is a powerful, conversational AI agent platform built on the Model Context Protocol (MCP). It features a robust server that exposes a suite of specialized AI-powered tools and a dynamic client that can intelligently discover and use them.
 
 The system is designed to be a versatile AI assistant, capable of everything from quick web searches and in-depth research to data visualization and code analysis. The client maintains conversational context, allowing for natural, follow-up questions.
 
 ---
 ## Key Concepts
 
-* **Message Control Protocol (MCP):** The backbone of this system. MCP provides a standard way for AI agents and tools to communicate. This allows our client to be "agnostic"—it can connect to any MCP-compliant server and use its tools without needing to be pre-programmed with their specific details.
+* **Model Context Protocol (MCP):** The backbone of this system. MCP provides a standard way for AI agents and tools to communicate. This allows our client to be "agnostic"—it can connect to any MCP-compliant server and use its tools without needing to be pre-programmed with their specific details.
 
 * **Dynamic Tool Discovery:** Upon connecting, the client asks the server, "What can you do?" The server responds with a machine-readable list of its tools, descriptions, and required inputs. This makes the system incredibly modular and extensible.
 
